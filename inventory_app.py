@@ -54,7 +54,7 @@ def load_data():
         df['crossmatched_date'] = df['crossmatched_date'].replace('None', np.nan)
         df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], format=DATE_FORMAT_STRING, errors='coerce')
     except Exception as e:
-        st.warning(f"Error loading dates: {e}. Attempting recovery.")
+        st.warning(f"Error loading dates: {e}. Attempting recovery. This likely means the CSV file is empty or corrupted.")
         df['collected'] = pd.NaT
         df['expiry'] = pd.NaT
         df['crossmatched_date'] = pd.NaT
@@ -204,6 +204,7 @@ with tab1:
             
         except Exception as e:
             st.error(f"An error occurred during save in Active Inventory. Error: {e}")
+            st.exception(e) # Display full traceback for better debugging
 
 
 with tab2:
@@ -220,7 +221,6 @@ with tab2:
         col_group, col_comp, col_src = st.columns(3)
         blood_group = col_group.selectbox("Blood Group", sorted(all_groups) if all_groups else ['A+', 'O-', 'AB+'])
         
-        # Component selection is key for expiry calculation
         selected_component_for_calc = col_comp.selectbox(
             "Component", 
             sorted(all_components) if all_components else ['Whole Blood', 'PRBC', 'FFP', 'Platelets'],
@@ -232,13 +232,11 @@ with tab2:
         
         default_collected = datetime.today().date()
         
-        # Input for collected date
         collected_date = col_coll.date_input("Collection Date", value=default_collected, key='collected_date_input')
         
         # Calculate default expiry based on selected component and collected date
         calculated_expiry = calculate_expiry_date(collected_date, selected_component_for_calc)
         
-        # The expiry date is automatically calculated but REMAINS EDITABLE
         expiry_date = col_exp.date_input(
             "Expiry Date (Auto-calculated, Edit if necessary)", 
             value=calculated_expiry, 
@@ -260,34 +258,51 @@ with tab2:
         submit_button = st.form_submit_button("➕ Add New Unit to Inventory", type="primary")
         
         if submit_button:
-            if not unit_id:
-                st.error("Please enter a Unit ID.")
-            elif unit_id in st.session_state['inventory_df']['unit_id'].values:
-                st.error(f"Unit ID {unit_id} already exists in the inventory.")
-            else:
-                # Prepare data for new unit
-                new_data_dict = {
-                    'unit_id': unit_id,
-                    'segment_number': segment_number if segment_number else 'N/A',
-                    'blood_group': blood_group,
-                    'component': selected_component_for_calc,
-                    'collected': collected_date, 
-                    'expiry': expiry_date,
-                    'volume': volume, 
-                    'source': source if source else 'Manual Entry',
-                    'status': initial_status,
-                    'patient_id': patient_id if patient_id else 'None',
-                    'crossmatched_date': crossmatch_date if crossmatch_date else np.datetime64('NaT')
-                }
+            try:
+                if not unit_id:
+                    st.error("Please enter a Unit ID.")
+                elif unit_id in st.session_state['inventory_df']['unit_id'].values:
+                    st.error(f"Unit ID {unit_id} already exists in the inventory.")
+                else:
+                    # Prepare data for new unit
+                    # CRITICAL FIX 4: Convert dates to strings using the global format *before* creating the DataFrame
+                    # This prevents type mismatch errors during concatenation/saving
+                    new_data_dict = {
+                        'unit_id': unit_id,
+                        'segment_number': segment_number if segment_number else 'N/A',
+                        'blood_group': blood_group,
+                        'component': selected_component_for_calc,
+                        'collected': collected_date.strftime(DATE_FORMAT_STRING), # Convert date to string
+                        'expiry': expiry_date.strftime(DATE_FORMAT_STRING),       # Convert date to string
+                        'volume': volume, 
+                        'source': source if source else 'Manual Entry',
+                        'status': initial_status,
+                        'patient_id': patient_id if patient_id else 'None',
+                        # Convert crossmatch date to string or 'None'
+                        'crossmatched_date': crossmatch_date.strftime(DATE_FORMAT_STRING) if crossmatch_date else 'None'
+                    }
 
-                new_unit_df = pd.DataFrame([new_data_dict], columns=MASTER_COLUMNS)
-                
-                st.session_state['inventory_df'] = pd.concat([st.session_state['inventory_df'], new_unit_df], ignore_index=True)
-
-                save_data(st.session_state['inventory_df'])
-
-                st.success(f"Unit {unit_id} successfully added and saved! Status: {initial_status}")
-                st.experimental_rerun()
+                    # Create DataFrame with explicit column order
+                    new_unit_df = pd.DataFrame([new_data_dict], columns=MASTER_COLUMNS)
+                    
+                    # Temporarily load the current state, ensuring all existing dates are string formatted for clean concatenation
+                    temp_current_df = st.session_state['inventory_df'].copy()
+                    temp_current_df['collected'] = temp_current_df['collected'].dt.strftime(DATE_FORMAT_STRING)
+                    temp_current_df['expiry'] = temp_current_df['expiry'].dt.strftime(DATE_FORMAT_STRING)
+                    temp_current_df['crossmatched_date'] = temp_current_df['crossmatched_date'].dt.strftime(DATE_FORMAT_STRING).fillna('None')
+                    
+                    # Concatenate the new string-based row
+                    final_concatenated_df = pd.concat([temp_current_df, new_unit_df], ignore_index=True)
+                    
+                    # Reload the final DataFrame to the session state (which triggers the load_data/conversion logic)
+                    save_data(final_concatenated_df) 
+                    
+                    # Rerun to force the load function to pick up the new data and update the state
+                    st.success(f"Unit {unit_id} successfully added and saved! Status: {initial_status}")
+                    st.experimental_rerun()
+            except Exception as e:
+                st.error(f"An error occurred while adding the unit. Error: {e}")
+                st.exception(e) # Display full traceback
 
 
 with tab3:
