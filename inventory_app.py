@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta, date # Import date separately for clarity
+from datetime import datetime, timedelta, date 
 import os
 import time 
 import numpy as np 
@@ -54,7 +54,6 @@ def load_data():
         df['crossmatched_date'] = df['crossmatched_date'].replace('None', np.nan)
         df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], format=DATE_FORMAT_STRING, errors='coerce')
     except Exception as e:
-        # Handle case where the CSV might be corrupted/empty on first run
         st.warning(f"Error loading dates: {e}. Attempting recovery.")
         df['collected'] = pd.NaT
         df['expiry'] = pd.NaT
@@ -109,7 +108,6 @@ st.session_state['inventory_df'] = update_inventory_status(st.session_state['inv
 st.set_page_config(layout="wide", page_title="Blood Unit Management System")
 
 # --- Live Clock Implementation Placeholder ---
-# This is where the clock will be displayed
 clock_placeholder = st.empty() 
 
 # --- Header ---
@@ -125,8 +123,10 @@ all_components = st.session_state['inventory_df']['component'].dropna().unique()
 selected_group = st.sidebar.selectbox("Blood Group", ['All'] + sorted(all_groups))
 selected_component = st.sidebar.selectbox("Component", ['All'] + sorted(all_components))
 
+# Start with the full inventory data
 filtered_df = st.session_state['inventory_df'].copy()
 
+# Apply Sidebar filters to the dataframe
 if selected_group != 'All':
     filtered_df = filtered_df[filtered_df['blood_group'] == selected_group]
 if selected_component != 'All':
@@ -151,8 +151,9 @@ tab1, tab2, tab3, tab4 = st.tabs(["Active Inventory (Edit/Delete)", "Add New Uni
 
 with tab1:
     st.header("Active Inventory & Management")
-    st.info("All dates are in MM/DD/YYYY format.")
+    st.info("All dates are in MM/DD/YYYY format. Set sidebar filters to 'All' to see all units.")
     
+    # CRITICAL FIX 3: Filter the already sidebar-filtered data based ONLY on active status
     active_inventory_df = filtered_df[filtered_df['status'].isin(['Available', 'Crossmatched', 'Expired'])].copy()
 
     active_inventory_df = active_inventory_df.sort_values(by=['status', 'expiry'], ascending=[False, True])
@@ -279,4 +280,50 @@ with tab2:
                     'crossmatched_date': crossmatch_date if crossmatch_date else np.datetime64('NaT')
                 }
 
-                new_unit_df = pd.DataFrame
+                new_unit_df = pd.DataFrame([new_data_dict], columns=MASTER_COLUMNS)
+                
+                st.session_state['inventory_df'] = pd.concat([st.session_state['inventory_df'], new_unit_df], ignore_index=True)
+
+                save_data(st.session_state['inventory_df'])
+
+                st.success(f"Unit {unit_id} successfully added and saved! Status: {initial_status}")
+                st.experimental_rerun()
+
+
+with tab3:
+    st.header("History: Transfused and Discarded Units")
+    st.write("Historical records of units that have left the active inventory.")
+    
+    transfused_df = filtered_df[filtered_df['status'] == 'Transfused'].copy()
+    discarded_df = filtered_df[filtered_df['status'] == 'Discarded'].copy()
+    
+    st.subheader("✅ Transfused Units")
+    if transfused_df.empty:
+        st.info("No units have been recorded as Transfused.")
+    else:
+        st.dataframe(transfused_df, use_container_width=True)
+
+    st.subheader("❌ Discarded Units")
+    if discarded_df.empty:
+        st.info("No units have been recorded as Discarded.")
+    else:
+        st.dataframe(discarded_df, use_container_width=True)
+
+
+with tab4:
+    st.header("Inventory Summary Report")
+    st.write("High-level overview of available inventory counts by Blood Group and Component.")
+    
+    summary = filtered_df[filtered_df['status'] == 'Available'].groupby('blood_group')['component'].value_counts().unstack(fill_value=0)
+    
+    if summary.empty:
+        st.info("No available units to generate a summary.")
+    else:
+        st.dataframe(summary)
+        
+        
+# --- Final Clock Loop ---
+while True:
+    with clock_placeholder:
+        st.markdown(f"#### ⏱️ Current Time: **{datetime.now().strftime(f'{DATE_FORMAT_STRING} | %I:%M:%S %p')}**")
+    time.sleep(1)
