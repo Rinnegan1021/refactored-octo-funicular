@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 import os
+import time 
+import numpy as np # NEW: Import numpy for NaT handling
 
 # --- Configuration ---
-# Use the current directory for the CSV file
 INVENTORY_FILE = 'df.csv'
 
 # --- Utility Functions ---
@@ -14,26 +15,38 @@ def load_data():
     if os.path.exists(INVENTORY_FILE):
         df = pd.read_csv(INVENTORY_FILE)
     else:
-        # Initialize with required columns if file doesn't exist
+        # Initialize with ALL required columns
         df = pd.DataFrame(columns=[
-            'unit_id', 'blood_group', 'component', 'collected', 'expiry', 
-            'status', 'patient_id', 'crossmatched_date'
+            'unit_id', 'segment_number', 'blood_group', 'component', 'collected', 'expiry', 
+            'volume', 'source', 
+            'status', 'patient_id', 'crossmatched_date' # Allocation fields are here
         ])
     
-    # Ensure date columns are proper datetime objects
+    # Ensure date columns are proper datetime objects for comparison
     df['collected'] = pd.to_datetime(df['collected'], errors='coerce')
     df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
+    df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], errors='coerce') # Ensure this is a datetime object
     
+    # Fill missing values
+    if 'segment_number' in df.columns:
+        df['segment_number'] = df['segment_number'].fillna('N/A').astype(str)
+    if 'volume' in df.columns:
+        df['volume'] = df['volume'].fillna(0).astype(int)
+    if 'source' in df.columns:
+        df['source'] = df['source'].fillna('Volunteer').astype(str)
+    if 'patient_id' in df.columns:
+        df['patient_id'] = df['patient_id'].fillna('None').astype(str)
+        
     return df
 
 def update_inventory_status(df):
     """Checks expiry dates and updates unit status."""
-    today = datetime.now()
+    today_date = datetime.now().normalize()
+    
+    expirable_statuses = ['Available', 'Crossmatched']
     
     # Mark as 'Expired'
-    # Units must be Available or Crossmatched to expire (not already Discarded/Transfused)
-    expirable_statuses = ['Available', 'Crossmatched']
-    df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'] < today), 'status'] = 'Expired'
+    df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'].dt.normalize() <= today_date), 'status'] = 'Expired'
     
     return df
 
@@ -42,33 +55,39 @@ def save_data(df):
     # Ensure dates are in YYYY-MM-DD string format before saving
     df['collected'] = df['collected'].dt.strftime('%Y-%m-%d')
     df['expiry'] = df['expiry'].dt.strftime('%Y-%m-%d')
+    # Use to_datetime on crossmatched_date before saving to handle NaT gracefully
+    df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date']).dt.strftime('%Y-%m-%d').replace('NaT', 'None')
     df.to_csv(INVENTORY_FILE, index=False)
     
 # --- Application Initialization ---
 
-# Load data and store it in Streamlit's session state
 if 'inventory_df' not in st.session_state:
     st.session_state['inventory_df'] = load_data()
 
-# Update statuses whenever the app runs
 st.session_state['inventory_df'] = update_inventory_status(st.session_state['inventory_df'].copy())
 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide", page_title="Blood Unit Management System")
+
+# --- Live Clock Implementation Placeholder ---
+clock_placeholder = st.empty()
+
+# --- Header ---
 st.title("🏥 Blood Unit Inventory Dashboard")
 st.write("---")
 
 # --- Sidebar Filters ---
 st.sidebar.header("🔍 Filter Inventory")
 
-# Get unique, sorted lists for filters (handle case where no data exists yet)
 all_groups = st.session_state['inventory_df']['blood_group'].dropna().unique().tolist()
 all_components = st.session_state['inventory_df']['component'].dropna().unique().tolist()
+all_sources = st.session_state['inventory_df']['source'].dropna().unique().tolist()
+standard_sources = ['Volunteer', 'Autologous', 'Directed', 'Other']
+source_options = sorted(list(set(all_sources + standard_sources)))
 
 selected_group = st.sidebar.selectbox("Blood Group", ['All'] + sorted(all_groups))
 selected_component = st.sidebar.selectbox("Component", ['All'] + sorted(all_components))
 
-# Apply filters
 filtered_df = st.session_state['inventory_df'].copy()
 
 if selected_group != 'All':
@@ -86,24 +105,21 @@ expired_units = filtered_df[filtered_df['status'] == 'Expired'].shape[0]
 col1.metric("Total Units", total_units)
 col2.metric("Available", available_units)
 col3.metric("Expired", expired_units)
-col4.metric("Discarded/Used", filtered_df[filtered_df['status'].isin(['Discarded', 'Transfused'])].shape[0])
+col4.metric("Used/Discarded", filtered_df[filtered_df['status'].isin(['Discarded', 'Transfused'])].shape[0])
 
 st.write("---")
 
 # --- Main Tabs for Inventory Views ---
-tab1, tab2, tab3, tab4 = st.tabs(["Active Inventory (Edit/Delete)", "Add New Unit", "Discarded/Used", "Summary Report"])
+tab1, tab2, tab3, tab4 = st.tabs(["Active Inventory (Edit/Delete)", "Add New Unit", "History (Transfused/Discarded)", "Summary Report"])
 
 with tab1:
     st.header("Active Inventory & Management")
-    st.info("Edit any cell or use the trash can icon on the left to delete rows. Click 'Save Changes' to finalize.")
+    st.info("Use this table to change status (e.g., to 'Crossmatched' or 'Transfused') and update Allocation details.")
     
-    # Filter for active/expiring units only (Available, Crossmatched, Expired)
     active_inventory_df = filtered_df[filtered_df['status'].isin(['Available', 'Crossmatched', 'Expired'])].copy()
 
-    # Sort to show Expired at the top for immediate attention
     active_inventory_df = active_inventory_df.sort_values(by=['status', 'expiry'], ascending=[False, True])
     
-    # Temporarily reset index for clean display, but store the original indices
     original_indices = active_inventory_df.index 
     active_inventory_df_display = active_inventory_df.reset_index(drop=True)
 
@@ -115,34 +131,32 @@ with tab1:
         use_container_width=True,
         column_config={
             "unit_id": st.column_config.Column("Unit ID", disabled=True),
+            "segment_number": st.column_config.Column("Segment No."),
             "blood_group": st.column_config.SelectboxColumn("Blood Group", options=sorted(all_groups)),
             "component": st.column_config.SelectboxColumn("Component", options=sorted(all_components)),
             "collected": st.column_config.DateColumn("Collected Date"),
             "expiry": st.column_config.DateColumn("Expiry Date"),
-            "status": st.column_config.SelectboxColumn("Status", options=['Available', 'Crossmatched', 'Transfused', 'Discarded', 'Expired'])
+            "volume": st.column_config.NumberColumn("Volume (mL)"),
+            "source": st.column_config.SelectboxColumn("Source", options=source_options),
+            "status": st.column_config.SelectboxColumn("Status", options=['Available', 'Crossmatched', 'Transfused', 'Discarded', 'Expired']),
+            "patient_id": st.column_config.Column("Patient ID", help="Required if status is Crossmatched or Transfused."), # Highlighted Allocation Field
+            "crossmatched_date": st.column_config.DateColumn("X-match Date"), # Highlighted Allocation Field
         }
     )
 
-    st.write("") # Add space
+    st.write("")
     
     # 2. Save Button Logic
     if st.button("💾 Save All Changes (Updates & Deletions)", type="primary"):
         try:
-            # Map the remaining edited rows back to their original index for merging
-            # This handles deletions, as deleted rows won't be in edited_df_display
             edited_df_display.index = original_indices[:len(edited_df_display)]
-            
-            # Identify the rows NOT shown in this editor tab (e.g., 'Transfused', 'Discarded', or units filtered out)
             df_to_keep = st.session_state['inventory_df'][~st.session_state['inventory_df'].index.isin(original_indices)]
-            
-            # Combine the kept data with the newly edited/retained data from the editor
             final_df = pd.concat([df_to_keep, edited_df_display])
             
-            # Re-ensure date formats are correct after editing
             final_df['collected'] = pd.to_datetime(final_df['collected'], errors='coerce')
             final_df['expiry'] = pd.to_datetime(final_df['expiry'], errors='coerce')
+            final_df['crossmatched_date'] = pd.to_datetime(final_df['crossmatched_date'], errors='coerce') # Re-convert after edit
             
-            # Update the status, save, and rerun
             st.session_state['inventory_df'] = update_inventory_status(final_df)
             save_data(st.session_state['inventory_df'])
             
@@ -150,24 +164,27 @@ with tab1:
             st.experimental_rerun()
             
         except Exception as e:
-            st.error(f"An error occurred during save. Please check your date formats or data integrity. Error: {e}")
+            st.error(f"An error occurred during save. Error: {e}")
 
 
 with tab2:
     st.header("Add New Unit")
     st.write("Use this form to add a new unit to the inventory.")
     
-    # Use st.form for grouping inputs and preventing excessive reruns
     with st.form("new_unit_form", clear_on_submit=True):
-        col_id, col_group, col_comp = st.columns(3)
-        
+        st.subheader("Unit Details")
+        col_id, col_seg, col_vol = st.columns(3)
         unit_id = col_id.text_input("Unit ID (e.g., 251210-A)")
+        segment_number = col_seg.text_input("Segment Number")
+        volume = col_vol.number_input("Volume (mL)", min_value=1, value=450, step=10)
+
+        col_group, col_comp, col_src = st.columns(3)
         blood_group = col_group.selectbox("Blood Group", sorted(all_groups) if all_groups else ['A+', 'O-', 'AB+'])
         component = col_comp.selectbox("Component", sorted(all_components) if all_components else ['Whole Blood', 'PRBC', 'FFP', 'Platelets'])
+        source = col_src.selectbox("Source", source_options)
         
         col_coll, col_exp = st.columns(2)
         
-        # Default collection date to today, default expiry 42 days later for PRBC (a common lifespan)
         default_collected = datetime.now().date()
         default_expiry = (datetime.now() + timedelta(days=42)).date()
         
@@ -175,54 +192,86 @@ with tab2:
         expiry_date = col_exp.date_input("Expiry Date", value=default_expiry)
         
         st.write("---")
+        st.subheader("Optional: Allocation Details (Unit Status will default to 'Available')")
+        
+        col_pat, col_xm = st.columns(2)
+        patient_id = col_pat.text_input("Allocate to Patient ID (Optional)")
+        crossmatch_date = col_xm.date_input("Crossmatch Date (Optional)", value=None) # Start with None
+        
+        # Determine initial status based on input
+        initial_status = 'Available'
+        if patient_id:
+            initial_status = 'Crossmatched'
+
+        st.write("---")
         submit_button = st.form_submit_button("➕ Add New Unit to Inventory", type="primary")
         
         if submit_button:
-            # Simple validation check
             if not unit_id:
                 st.error("Please enter a Unit ID.")
             elif unit_id in st.session_state['inventory_df']['unit_id'].values:
                 st.error(f"Unit ID {unit_id} already exists in the inventory.")
             else:
-                # 1. Create the new row data
                 new_data = {
                     'unit_id': unit_id,
+                    'segment_number': segment_number if segment_number else 'N/A',
                     'blood_group': blood_group,
                     'component': component,
                     'collected': collected_date, 
                     'expiry': expiry_date,
-                    'status': 'Available',
-                    'patient_id': 'None',
-                    'crossmatched_date': pd.NaT 
+                    'volume': volume, 
+                    'source': source,
+                    'status': initial_status, # Use determined status
+                    'patient_id': patient_id if patient_id else 'None',
+                    # Handle crossmatch date: set to date if entered, or NaT (Not a Time)
+                    'crossmatched_date': crossmatch_date if crossmatch_date else np.datetime64('NaT')
                 }
 
-                # 2. Append to the main inventory DataFrame
                 new_unit_df = pd.DataFrame([new_data])
                 st.session_state['inventory_df'] = pd.concat([st.session_state['inventory_df'], new_unit_df], ignore_index=True)
 
-                # 3. Save the updated DataFrame to the CSV file
                 save_data(st.session_state['inventory_df'])
 
-                st.success(f"Unit {unit_id} successfully added and saved!")
+                st.success(f"Unit {unit_id} successfully added and saved! Status: {initial_status}")
                 st.experimental_rerun()
 
 
 with tab3:
-    st.header("Discarded & Transfused Units")
-    st.write("Units in the 'Discarded' or 'Transfused' status are shown here for historical reference.")
+    st.header("History: Transfused and Discarded Units")
+    st.write("Historical records of units that have left the active inventory.")
     
-    # Filter for used/discarded units
-    history_df = filtered_df[filtered_df['status'].isin(['Discarded', 'Transfused'])].copy()
+    transfused_df = filtered_df[filtered_df['status'] == 'Transfused'].copy()
+    discarded_df = filtered_df[filtered_df['status'] == 'Discarded'].copy()
     
-    # No editing/deleting here for data integrity
-    st.dataframe(history_df, use_container_width=True)
+    st.subheader("✅ Transfused Units")
+    if transfused_df.empty:
+        st.info("No units have been recorded as Transfused.")
+    else:
+        st.dataframe(transfused_df, use_container_width=True)
+
+    st.subheader("❌ Discarded Units")
+    if discarded_df.empty:
+        st.info("No units have been recorded as Discarded.")
+    else:
+        st.dataframe(discarded_df, use_container_width=True)
 
 
 with tab4:
     st.header("Inventory Summary Report")
     st.write("High-level overview of available inventory counts by Blood Group and Component.")
     
-    # Pivot table to summarize counts by group and component
     summary = filtered_df[filtered_df['status'] == 'Available'].groupby('blood_group')['component'].value_counts().unstack(fill_value=0)
     
-    st.dataframe(summary)
+    if summary.empty:
+        st.info("No available units to generate a summary.")
+    else:
+        st.dataframe(summary)
+        
+        
+# --- Final Clock Loop ---
+# This loop runs forever and updates the clock_placeholder every second.
+while True:
+    with clock_placeholder:
+        current_time = datetime.now().strftime("%A, %B %d, %Y | %I:%M:%S %p")
+        st.markdown(f"#### ⏱️ Current Time: **{current_time}**")
+    time.sleep(1)
