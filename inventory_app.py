@@ -42,17 +42,17 @@ def load_data():
     else:
         df = pd.DataFrame(columns=MASTER_COLUMNS)
     
-    try:
-        df['collected'] = pd.to_datetime(df['collected'], format=DATE_FORMAT_STRING, errors='coerce')
-        df['expiry'] = pd.to_datetime(df['expiry'], format=DATE_FORMAT_STRING, errors='coerce')
-        df['crossmatched_date'] = df['crossmatched_date'].replace('None', np.nan)
-        df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], format=DATE_FORMAT_STRING, errors='coerce')
-    except Exception as e:
-        st.warning(f"Error loading dates: {e}. Defaulting to empty dates.")
-        df['collected'] = pd.NaT
-        df['expiry'] = pd.NaT
-        df['crossmatched_date'] = pd.NaT
-
+    # CRITICAL FIX 1: Ensure date columns are proper datetime objects using the correct format
+    # Replace 'None' string with NaN (which Pandas converts to NaT) before conversion
+    for col in ['collected', 'expiry', 'crossmatched_date']:
+        if col in df.columns:
+            # Force replace the 'None' string value with NaN for clean conversion
+            df[col] = df[col].replace('None', np.nan) 
+            df[col] = pd.to_datetime(df[col], format=DATE_FORMAT_STRING, errors='coerce')
+        else:
+            df[col] = pd.NaT # Ensure column exists and is NaT if missing
+            
+    # Fill missing values to maintain data types
     if 'segment_number' in df.columns:
         df['segment_number'] = df['segment_number'].fillna('N/A').astype(str)
     if 'volume' in df.columns:
@@ -69,6 +69,9 @@ def update_inventory_status(df):
     """Checks expiry dates and updates unit status."""
     today_date_only = datetime.today().date()
     expirable_statuses = ['Available', 'Crossmatched']
+    
+    # CRITICAL FIX 2: Ensure the expiry column is explicitly treated as a datetime accessor (dt)
+    # The load_data fix above should guarantee this works without error now.
     df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'].dt.date <= today_date_only), 'status'] = 'Expired'
     return df
 
@@ -76,7 +79,8 @@ def save_data(df):
     """Saves the current DataFrame back to the CSV file using the specified format."""
     
     def date_to_string(d):
-        if pd.isna(d):
+        # Checks for NaT (Pandas Not a Time)
+        if pd.isna(d): 
             return 'None'
         try:
             return d.strftime(DATE_FORMAT_STRING)
@@ -94,6 +98,7 @@ def save_data(df):
 if 'inventory_df' not in st.session_state:
     st.session_state['inventory_df'] = load_data()
 
+# The update call that was failing
 st.session_state['inventory_df'] = update_inventory_status(st.session_state['inventory_df'].copy())
 
 # --- Streamlit UI ---
@@ -178,6 +183,7 @@ with tab1:
             df_to_keep = st.session_state['inventory_df'][~st.session_state['inventory_df'].index.isin(original_indices)]
             final_df = pd.concat([df_to_keep, edited_df_display])
             
+            # Re-convert dates to datetime objects for internal consistency before saving
             final_df['collected'] = pd.to_datetime(final_df['collected'], errors='coerce')
             final_df['expiry'] = pd.to_datetime(final_df['expiry'], errors='coerce')
             final_df['crossmatched_date'] = pd.to_datetime(final_df['crossmatched_date'], errors='coerce')
@@ -186,7 +192,7 @@ with tab1:
             save_data(st.session_state['inventory_df'])
             
             st.success("Inventory changes saved successfully!")
-            st.rerun() # FIX: Replaced st.experimental_rerun()
+            st.rerun()
             
         except Exception as e:
             st.error(f"An error occurred during save in Active Inventory. Error: {e}")
@@ -272,6 +278,7 @@ with tab2:
 
                     new_unit_df = pd.DataFrame([new_data_dict], columns=MASTER_COLUMNS)
                     
+                    # Temporarily load the current state and make sure it's string formatted for concatenation
                     temp_current_df = st.session_state['inventory_df'].copy()
                     temp_current_df['collected'] = temp_current_df['collected'].apply(lambda x: x.strftime(DATE_FORMAT_STRING) if pd.notna(x) else 'None')
                     temp_current_df['expiry'] = temp_current_df['expiry'].apply(lambda x: x.strftime(DATE_FORMAT_STRING) if pd.notna(x) else 'None')
@@ -282,7 +289,7 @@ with tab2:
                     save_data(final_concatenated_df) 
                     
                     st.success(f"Unit {unit_id} successfully added and saved! Status: {initial_status}")
-                    st.rerun() # FIX: Replaced st.experimental_rerun()
+                    st.rerun()
             except Exception as e:
                 st.error(f"An error occurred while adding the unit. **Please check the full traceback below and send me the error message!**")
                 st.exception(e)
