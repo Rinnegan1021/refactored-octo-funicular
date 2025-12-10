@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 import time 
-import numpy as np # NEW: Import numpy for NaT handling
+import numpy as np 
 
 # --- Configuration ---
 INVENTORY_FILE = 'df.csv'
@@ -19,13 +19,13 @@ def load_data():
         df = pd.DataFrame(columns=[
             'unit_id', 'segment_number', 'blood_group', 'component', 'collected', 'expiry', 
             'volume', 'source', 
-            'status', 'patient_id', 'crossmatched_date' # Allocation fields are here
+            'status', 'patient_id', 'crossmatched_date' 
         ])
     
     # Ensure date columns are proper datetime objects for comparison
     df['collected'] = pd.to_datetime(df['collected'], errors='coerce')
     df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
-    df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], errors='coerce') # Ensure this is a datetime object
+    df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], errors='coerce')
     
     # Fill missing values
     if 'segment_number' in df.columns:
@@ -41,12 +41,16 @@ def load_data():
 
 def update_inventory_status(df):
     """Checks expiry dates and updates unit status."""
-    today_date = datetime.now().normalize()
+    
+    # CRITICAL FIX: Use datetime.today().date() to get a simple, comparable date object.
+    # This avoids the .normalize() error and timezone issues.
+    today_date_only = datetime.today().date()
     
     expirable_statuses = ['Available', 'Crossmatched']
     
-    # Mark as 'Expired'
-    df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'].dt.normalize() <= today_date), 'status'] = 'Expired'
+    # Mark as 'Expired' - Comparing the DATE part of the expiry column
+    # We compare the date part of the expiry column against today's date
+    df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'].dt.date <= today_date_only), 'status'] = 'Expired'
     
     return df
 
@@ -64,6 +68,7 @@ def save_data(df):
 if 'inventory_df' not in st.session_state:
     st.session_state['inventory_df'] = load_data()
 
+# This is the line that was throwing the error, now using the corrected function:
 st.session_state['inventory_df'] = update_inventory_status(st.session_state['inventory_df'].copy())
 
 # --- Streamlit UI ---
@@ -139,8 +144,8 @@ with tab1:
             "volume": st.column_config.NumberColumn("Volume (mL)"),
             "source": st.column_config.SelectboxColumn("Source", options=source_options),
             "status": st.column_config.SelectboxColumn("Status", options=['Available', 'Crossmatched', 'Transfused', 'Discarded', 'Expired']),
-            "patient_id": st.column_config.Column("Patient ID", help="Required if status is Crossmatched or Transfused."), # Highlighted Allocation Field
-            "crossmatched_date": st.column_config.DateColumn("X-match Date"), # Highlighted Allocation Field
+            "patient_id": st.column_config.Column("Patient ID", help="Required if status is Crossmatched or Transfused."),
+            "crossmatched_date": st.column_config.DateColumn("X-match Date"),
         }
     )
 
@@ -155,7 +160,7 @@ with tab1:
             
             final_df['collected'] = pd.to_datetime(final_df['collected'], errors='coerce')
             final_df['expiry'] = pd.to_datetime(final_df['expiry'], errors='coerce')
-            final_df['crossmatched_date'] = pd.to_datetime(final_df['crossmatched_date'], errors='coerce') # Re-convert after edit
+            final_df['crossmatched_date'] = pd.to_datetime(final_df['crossmatched_date'], errors='coerce')
             
             st.session_state['inventory_df'] = update_inventory_status(final_df)
             save_data(st.session_state['inventory_df'])
@@ -185,8 +190,8 @@ with tab2:
         
         col_coll, col_exp = st.columns(2)
         
-        default_collected = datetime.now().date()
-        default_expiry = (datetime.now() + timedelta(days=42)).date()
+        default_collected = datetime.today().date()
+        default_expiry = (datetime.today() + timedelta(days=42)).date()
         
         collected_date = col_coll.date_input("Collection Date", value=default_collected)
         expiry_date = col_exp.date_input("Expiry Date", value=default_expiry)
@@ -196,9 +201,8 @@ with tab2:
         
         col_pat, col_xm = st.columns(2)
         patient_id = col_pat.text_input("Allocate to Patient ID (Optional)")
-        crossmatch_date = col_xm.date_input("Crossmatch Date (Optional)", value=None) # Start with None
+        crossmatch_date = col_xm.date_input("Crossmatch Date (Optional)", value=None)
         
-        # Determine initial status based on input
         initial_status = 'Available'
         if patient_id:
             initial_status = 'Crossmatched'
@@ -221,9 +225,8 @@ with tab2:
                     'expiry': expiry_date,
                     'volume': volume, 
                     'source': source,
-                    'status': initial_status, # Use determined status
+                    'status': initial_status,
                     'patient_id': patient_id if patient_id else 'None',
-                    # Handle crossmatch date: set to date if entered, or NaT (Not a Time)
                     'crossmatched_date': crossmatch_date if crossmatch_date else np.datetime64('NaT')
                 }
 
