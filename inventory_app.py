@@ -7,7 +7,7 @@ import os
 # Use the current directory for the CSV file
 INVENTORY_FILE = 'df.csv'
 
-# --- Utility Functions (Refined) ---
+# --- Utility Functions ---
 
 def load_data():
     """Loads or initializes the inventory DataFrame."""
@@ -31,10 +31,9 @@ def update_inventory_status(df):
     today = datetime.now()
     
     # Mark as 'Expired'
-    df.loc[(df['status'] == 'Available') & (df['expiry'] < today), 'status'] = 'Expired'
-
-    # Mark as 'Discarded' if expired and not already marked
-    df.loc[(df['status'] == 'Expired') & (df['status'] != 'Discarded') & (df['expiry'] < today), 'status'] = 'Discarded'
+    # Units must be Available or Crossmatched to expire (not already Discarded/Transfused)
+    expirable_statuses = ['Available', 'Crossmatched']
+    df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'] < today), 'status'] = 'Expired'
     
     return df
 
@@ -51,7 +50,7 @@ def save_data(df):
 if 'inventory_df' not in st.session_state:
     st.session_state['inventory_df'] = load_data()
 
-# Update statuses whenever the app runs (important for expiry checks)
+# Update statuses whenever the app runs
 st.session_state['inventory_df'] = update_inventory_status(st.session_state['inventory_df'].copy())
 
 # --- Streamlit UI ---
@@ -62,9 +61,9 @@ st.write("---")
 # --- Sidebar Filters ---
 st.sidebar.header("🔍 Filter Inventory")
 
-# Get unique, sorted lists for filters
-all_groups = st.session_state['inventory_df']['blood_group'].unique().tolist()
-all_components = st.session_state['inventory_df']['component'].unique().tolist()
+# Get unique, sorted lists for filters (handle case where no data exists yet)
+all_groups = st.session_state['inventory_df']['blood_group'].dropna().unique().tolist()
+all_components = st.session_state['inventory_df']['component'].dropna().unique().tolist()
 
 selected_group = st.sidebar.selectbox("Blood Group", ['All'] + sorted(all_groups))
 selected_component = st.sidebar.selectbox("Component", ['All'] + sorted(all_components))
@@ -87,7 +86,7 @@ expired_units = filtered_df[filtered_df['status'] == 'Expired'].shape[0]
 col1.metric("Total Units", total_units)
 col2.metric("Available", available_units)
 col3.metric("Expired", expired_units)
-col4.metric("Discarded", filtered_df[filtered_df['status'] == 'Discarded'].shape[0])
+col4.metric("Discarded/Used", filtered_df[filtered_df['status'].isin(['Discarded', 'Transfused'])].shape[0])
 
 st.write("---")
 
@@ -98,18 +97,22 @@ with tab1:
     st.header("Active Inventory & Management")
     st.info("Edit any cell or use the trash can icon on the left to delete rows. Click 'Save Changes' to finalize.")
     
-    # Filter for active units only (Available, Crossmatched, Expired)
+    # Filter for active/expiring units only (Available, Crossmatched, Expired)
     active_inventory_df = filtered_df[filtered_df['status'].isin(['Available', 'Crossmatched', 'Expired'])].copy()
 
-    # Sort to show Expired at the top
-    active_inventory_df = active_inventory_df.sort_values(by='status', ascending=False)
+    # Sort to show Expired at the top for immediate attention
+    active_inventory_df = active_inventory_df.sort_values(by=['status', 'expiry'], ascending=[False, True])
     
+    # Temporarily reset index for clean display, but store the original indices
+    original_indices = active_inventory_df.index 
+    active_inventory_df_display = active_inventory_df.reset_index(drop=True)
+
     # 1. Use st.data_editor for viewing and allowing editing/deletion
-    edited_df = st.data_editor(
-        active_inventory_df,
+    edited_df_display = st.data_editor(
+        active_inventory_df_display,
         key="active_inventory_editor",
         num_rows="dynamic",
-        use_container_width=True, # Will be replaced by 'width' in Streamlit update
+        use_container_width=True,
         column_config={
             "unit_id": st.column_config.Column("Unit ID", disabled=True),
             "blood_group": st.column_config.SelectboxColumn("Blood Group", options=sorted(all_groups)),
@@ -125,25 +128,21 @@ with tab1:
     # 2. Save Button Logic
     if st.button("💾 Save All Changes (Updates & Deletions)", type="primary"):
         try:
-            # Recombine the edited data with the data we didn't show in this view
+            # Map the remaining edited rows back to their original index for merging
+            # This handles deletions, as deleted rows won't be in edited_df_display
+            edited_df_display.index = original_indices[:len(edited_df_display)]
             
-            # Get the indices of the rows that were shown and potentially edited/deleted
-            original_indices = active_inventory_df.index
-            
-            # Get the indices of the rows remaining in the edited table
-            remaining_indices = edited_df.index
-            
-            # Identify rows to keep (those that were not deleted)
+            # Identify the rows NOT shown in this editor tab (e.g., 'Transfused', 'Discarded', or units filtered out)
             df_to_keep = st.session_state['inventory_df'][~st.session_state['inventory_df'].index.isin(original_indices)]
             
-            # Concatenate the kept rows with the newly edited/retained rows
-            final_df = pd.concat([df_to_keep, edited_df])
+            # Combine the kept data with the newly edited/retained data from the editor
+            final_df = pd.concat([df_to_keep, edited_df_display])
             
             # Re-ensure date formats are correct after editing
             final_df['collected'] = pd.to_datetime(final_df['collected'], errors='coerce')
             final_df['expiry'] = pd.to_datetime(final_df['expiry'], errors='coerce')
             
-            # Update and save
+            # Update the status, save, and rerun
             st.session_state['inventory_df'] = update_inventory_status(final_df)
             save_data(st.session_state['inventory_df'])
             
@@ -151,13 +150,14 @@ with tab1:
             st.experimental_rerun()
             
         except Exception as e:
-            st.error(f"An error occurred during save: {e}")
+            st.error(f"An error occurred during save. Please check your date formats or data integrity. Error: {e}")
 
 
 with tab2:
     st.header("Add New Unit")
     st.write("Use this form to add a new unit to the inventory.")
     
+    # Use st.form for grouping inputs and preventing excessive reruns
     with st.form("new_unit_form", clear_on_submit=True):
         col_id, col_group, col_comp = st.columns(3)
         
@@ -220,7 +220,7 @@ with tab3:
 
 with tab4:
     st.header("Inventory Summary Report")
-    st.write("High-level overview of inventory counts by Blood Group and Component.")
+    st.write("High-level overview of available inventory counts by Blood Group and Component.")
     
     # Pivot table to summarize counts by group and component
     summary = filtered_df[filtered_df['status'] == 'Available'].groupby('blood_group')['component'].value_counts().unstack(fill_value=0)
