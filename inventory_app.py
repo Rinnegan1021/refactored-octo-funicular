@@ -7,6 +7,12 @@ import numpy as np
 
 # --- Configuration ---
 INVENTORY_FILE = 'df.csv'
+# Define the master column order for consistency
+MASTER_COLUMNS = [
+    'unit_id', 'segment_number', 'blood_group', 'component', 'collected', 'expiry', 
+    'volume', 'source', 
+    'status', 'patient_id', 'crossmatched_date' 
+]
 
 # --- Utility Functions ---
 
@@ -16,51 +22,50 @@ def load_data():
         df = pd.read_csv(INVENTORY_FILE)
     else:
         # Initialize with ALL required columns
-        df = pd.DataFrame(columns=[
-            'unit_id', 'segment_number', 'blood_group', 'component', 'collected', 'expiry', 
-            'volume', 'source', 
-            'status', 'patient_id', 'crossmatched_date' 
-        ])
+        df = pd.DataFrame(columns=MASTER_COLUMNS)
     
     # Ensure date columns are proper datetime objects for comparison
     df['collected'] = pd.to_datetime(df['collected'], errors='coerce')
     df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
     df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], errors='coerce')
     
-    # Fill missing values
+    # Fill missing values to maintain data types
     if 'segment_number' in df.columns:
         df['segment_number'] = df['segment_number'].fillna('N/A').astype(str)
     if 'volume' in df.columns:
         df['volume'] = df['volume'].fillna(0).astype(int)
     if 'source' in df.columns:
-        df['source'] = df['source'].fillna('Volunteer').astype(str)
+        df['source'] = df['source'].fillna('Manual Entry').astype(str) # Default updated
     if 'patient_id' in df.columns:
         df['patient_id'] = df['patient_id'].fillna('None').astype(str)
         
+    # Ensure the dataframe has the correct final column order
+    df = df.reindex(columns=MASTER_COLUMNS, fill_value=None)
     return df
 
 def update_inventory_status(df):
     """Checks expiry dates and updates unit status."""
-    
-    # CRITICAL FIX: Use datetime.today().date() to get a simple, comparable date object.
-    # This avoids the .normalize() error and timezone issues.
     today_date_only = datetime.today().date()
     
     expirable_statuses = ['Available', 'Crossmatched']
     
-    # Mark as 'Expired' - Comparing the DATE part of the expiry column
-    # We compare the date part of the expiry column against today's date
+    # Mark as 'Expired'
     df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'].dt.date <= today_date_only), 'status'] = 'Expired'
     
     return df
 
 def save_data(df):
     """Saves the current DataFrame back to the CSV file."""
-    # Ensure dates are in YYYY-MM-DD string format before saving
+    
+    # Convert dates to string format
     df['collected'] = df['collected'].dt.strftime('%Y-%m-%d')
     df['expiry'] = df['expiry'].dt.strftime('%Y-%m-%d')
-    # Use to_datetime on crossmatched_date before saving to handle NaT gracefully
-    df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date']).dt.strftime('%Y-%m-%d').replace('NaT', 'None')
+    
+    # Replace NaT in crossmatched_date with 'None' before saving
+    df['crossmatched_date'] = df['crossmatched_date'].apply(
+        lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else 'None'
+    )
+    
     df.to_csv(INVENTORY_FILE, index=False)
     
 # --- Application Initialization ---
@@ -68,7 +73,7 @@ def save_data(df):
 if 'inventory_df' not in st.session_state:
     st.session_state['inventory_df'] = load_data()
 
-# This is the line that was throwing the error, now using the corrected function:
+# Ensure the status is up to date on load
 st.session_state['inventory_df'] = update_inventory_status(st.session_state['inventory_df'].copy())
 
 # --- Streamlit UI ---
@@ -86,9 +91,6 @@ st.sidebar.header("🔍 Filter Inventory")
 
 all_groups = st.session_state['inventory_df']['blood_group'].dropna().unique().tolist()
 all_components = st.session_state['inventory_df']['component'].dropna().unique().tolist()
-all_sources = st.session_state['inventory_df']['source'].dropna().unique().tolist()
-standard_sources = ['Volunteer', 'Autologous', 'Directed', 'Other']
-source_options = sorted(list(set(all_sources + standard_sources)))
 
 selected_group = st.sidebar.selectbox("Blood Group", ['All'] + sorted(all_groups))
 selected_component = st.sidebar.selectbox("Component", ['All'] + sorted(all_components))
@@ -119,7 +121,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["Active Inventory (Edit/Delete)", "Add New Uni
 
 with tab1:
     st.header("Active Inventory & Management")
-    st.info("Use this table to change status (e.g., to 'Crossmatched' or 'Transfused') and update Allocation details.")
+    st.info("The 'Source' field is now free-text input for flexibility.")
     
     active_inventory_df = filtered_df[filtered_df['status'].isin(['Available', 'Crossmatched', 'Expired'])].copy()
 
@@ -142,7 +144,7 @@ with tab1:
             "collected": st.column_config.DateColumn("Collected Date"),
             "expiry": st.column_config.DateColumn("Expiry Date"),
             "volume": st.column_config.NumberColumn("Volume (mL)"),
-            "source": st.column_config.SelectboxColumn("Source", options=source_options),
+            "source": st.column_config.Column("Source"), # FIX: Changed to standard Column for free text
             "status": st.column_config.SelectboxColumn("Status", options=['Available', 'Crossmatched', 'Transfused', 'Discarded', 'Expired']),
             "patient_id": st.column_config.Column("Patient ID", help="Required if status is Crossmatched or Transfused."),
             "crossmatched_date": st.column_config.DateColumn("X-match Date"),
@@ -169,7 +171,7 @@ with tab1:
             st.experimental_rerun()
             
         except Exception as e:
-            st.error(f"An error occurred during save. Error: {e}")
+            st.error(f"An error occurred during save in Active Inventory. Error: {e}")
 
 
 with tab2:
@@ -186,7 +188,7 @@ with tab2:
         col_group, col_comp, col_src = st.columns(3)
         blood_group = col_group.selectbox("Blood Group", sorted(all_groups) if all_groups else ['A+', 'O-', 'AB+'])
         component = col_comp.selectbox("Component", sorted(all_components) if all_components else ['Whole Blood', 'PRBC', 'FFP', 'Platelets'])
-        source = col_src.selectbox("Source", source_options)
+        source = col_src.text_input("Source (e.g., Main Hospital, Donor Bus)") # FIX: Changed to text_input
         
         col_coll, col_exp = st.columns(2)
         
@@ -216,7 +218,7 @@ with tab2:
             elif unit_id in st.session_state['inventory_df']['unit_id'].values:
                 st.error(f"Unit ID {unit_id} already exists in the inventory.")
             else:
-                new_data = {
+                new_data_dict = {
                     'unit_id': unit_id,
                     'segment_number': segment_number if segment_number else 'N/A',
                     'blood_group': blood_group,
@@ -224,13 +226,14 @@ with tab2:
                     'collected': collected_date, 
                     'expiry': expiry_date,
                     'volume': volume, 
-                    'source': source,
+                    'source': source if source else 'Manual Entry', # Use free text input
                     'status': initial_status,
                     'patient_id': patient_id if patient_id else 'None',
                     'crossmatched_date': crossmatch_date if crossmatch_date else np.datetime64('NaT')
                 }
 
-                new_unit_df = pd.DataFrame([new_data])
+                new_unit_df = pd.DataFrame([new_data_dict], columns=MASTER_COLUMNS)
+                
                 st.session_state['inventory_df'] = pd.concat([st.session_state['inventory_df'], new_unit_df], ignore_index=True)
 
                 save_data(st.session_state['inventory_df'])
