@@ -7,6 +7,7 @@ import numpy as np
 
 # --- Configuration ---
 INVENTORY_FILE = 'df.csv'
+DATE_FORMAT_STRING = '%m/%d/%Y' # New Standard Date Format
 # Define the master column order for consistency
 MASTER_COLUMNS = [
     'unit_id', 'segment_number', 'blood_group', 'component', 'collected', 'expiry', 
@@ -16,30 +17,48 @@ MASTER_COLUMNS = [
 
 # --- Utility Functions ---
 
+def calculate_expiry_date(collected_date, component):
+    """Calculates the expiry date based on the component and collected date."""
+    if collected_date is None:
+        return datetime.today().date()
+    
+    if component in ['PRBC', 'Whole Blood']:
+        # PRBC and Whole Blood: 35 days
+        return collected_date + timedelta(days=35)
+    elif component == 'Platelets':
+        # Platelets: 5 days
+        return collected_date + timedelta(days=5)
+    elif component == 'FFP':
+        # FFP (Frozen Plasma): 7 years (approximately 2555 days)
+        return collected_date + timedelta(days=7 * 365 + 1) # Add one day for leap years coverage
+    else:
+        # Default for unknown/other components (e.g., 42 days for some PRBC)
+        return collected_date + timedelta(days=42)
+
 def load_data():
     """Loads or initializes the inventory DataFrame."""
     if os.path.exists(INVENTORY_FILE):
         df = pd.read_csv(INVENTORY_FILE)
     else:
-        # Initialize with ALL required columns
         df = pd.DataFrame(columns=MASTER_COLUMNS)
     
-    # Ensure date columns are proper datetime objects for comparison
-    df['collected'] = pd.to_datetime(df['collected'], errors='coerce')
-    df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
-    df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], errors='coerce')
+    # CRITICAL FIX 1: Ensure date columns are proper datetime objects using the correct format
+    df['collected'] = pd.to_datetime(df['collected'], format=DATE_FORMAT_STRING, errors='coerce')
+    df['expiry'] = pd.to_datetime(df['expiry'], format=DATE_FORMAT_STRING, errors='coerce')
+    # Crossmatched date might be 'None', handle explicitly
+    df['crossmatched_date'] = df['crossmatched_date'].replace('None', np.nan)
+    df['crossmatched_date'] = pd.to_datetime(df['crossmatched_date'], format=DATE_FORMAT_STRING, errors='coerce')
     
-    # Fill missing values to maintain data types
+    # Fill missing values
     if 'segment_number' in df.columns:
         df['segment_number'] = df['segment_number'].fillna('N/A').astype(str)
     if 'volume' in df.columns:
         df['volume'] = df['volume'].fillna(0).astype(int)
     if 'source' in df.columns:
-        df['source'] = df['source'].fillna('Manual Entry').astype(str) # Default updated
+        df['source'] = df['source'].fillna('Manual Entry').astype(str)
     if 'patient_id' in df.columns:
         df['patient_id'] = df['patient_id'].fillna('None').astype(str)
         
-    # Ensure the dataframe has the correct final column order
     df = df.reindex(columns=MASTER_COLUMNS, fill_value=None)
     return df
 
@@ -50,20 +69,21 @@ def update_inventory_status(df):
     expirable_statuses = ['Available', 'Crossmatched']
     
     # Mark as 'Expired'
+    # Use .dt.date to compare only the date parts, which is safe and reliable.
     df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'].dt.date <= today_date_only), 'status'] = 'Expired'
     
     return df
 
 def save_data(df):
-    """Saves the current DataFrame back to the CSV file."""
+    """Saves the current DataFrame back to the CSV file using the specified format."""
     
-    # Convert dates to string format
-    df['collected'] = df['collected'].dt.strftime('%Y-%m-%d')
-    df['expiry'] = df['expiry'].dt.strftime('%Y-%m-%d')
+    # CRITICAL FIX 2: Save all dates in the specified 'mm/dd/yyyy' format
+    df['collected'] = df['collected'].dt.strftime(DATE_FORMAT_STRING)
+    df['expiry'] = df['expiry'].dt.strftime(DATE_FORMAT_STRING)
     
     # Replace NaT in crossmatched_date with 'None' before saving
     df['crossmatched_date'] = df['crossmatched_date'].apply(
-        lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else 'None'
+        lambda x: x.strftime(DATE_FORMAT_STRING) if pd.notna(x) else 'None'
     )
     
     df.to_csv(INVENTORY_FILE, index=False)
@@ -121,7 +141,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["Active Inventory (Edit/Delete)", "Add New Uni
 
 with tab1:
     st.header("Active Inventory & Management")
-    st.info("The 'Source' field is now free-text input for flexibility.")
+    st.info("Dates are displayed in MM/DD/YYYY format.")
     
     active_inventory_df = filtered_df[filtered_df['status'].isin(['Available', 'Crossmatched', 'Expired'])].copy()
 
@@ -141,13 +161,13 @@ with tab1:
             "segment_number": st.column_config.Column("Segment No."),
             "blood_group": st.column_config.SelectboxColumn("Blood Group", options=sorted(all_groups)),
             "component": st.column_config.SelectboxColumn("Component", options=sorted(all_components)),
-            "collected": st.column_config.DateColumn("Collected Date"),
-            "expiry": st.column_config.DateColumn("Expiry Date"),
+            "collected": st.column_config.DateColumn("Collected Date", format="MM/DD/YYYY"), # FIX: Explicit date format
+            "expiry": st.column_config.DateColumn("Expiry Date", format="MM/DD/YYYY"), # FIX: Explicit date format
             "volume": st.column_config.NumberColumn("Volume (mL)"),
-            "source": st.column_config.Column("Source"), # FIX: Changed to standard Column for free text
+            "source": st.column_config.Column("Source"),
             "status": st.column_config.SelectboxColumn("Status", options=['Available', 'Crossmatched', 'Transfused', 'Discarded', 'Expired']),
             "patient_id": st.column_config.Column("Patient ID", help="Required if status is Crossmatched or Transfused."),
-            "crossmatched_date": st.column_config.DateColumn("X-match Date"),
+            "crossmatched_date": st.column_config.DateColumn("X-match Date", format="MM/DD/YYYY"), # FIX: Explicit date format
         }
     )
 
@@ -160,6 +180,7 @@ with tab1:
             df_to_keep = st.session_state['inventory_df'][~st.session_state['inventory_df'].index.isin(original_indices)]
             final_df = pd.concat([df_to_keep, edited_df_display])
             
+            # Re-convert dates to datetime objects for internal consistency before saving
             final_df['collected'] = pd.to_datetime(final_df['collected'], errors='coerce')
             final_df['expiry'] = pd.to_datetime(final_df['expiry'], errors='coerce')
             final_df['crossmatched_date'] = pd.to_datetime(final_df['crossmatched_date'], errors='coerce')
@@ -178,6 +199,10 @@ with tab2:
     st.header("Add New Unit")
     st.write("Use this form to add a new unit to the inventory.")
     
+    # State variable to hold the selected component for dynamic calculation
+    if 'current_component' not in st.session_state:
+        st.session_state['current_component'] = 'Whole Blood'
+        
     with st.form("new_unit_form", clear_on_submit=True):
         st.subheader("Unit Details")
         col_id, col_seg, col_vol = st.columns(3)
@@ -187,19 +212,33 @@ with tab2:
 
         col_group, col_comp, col_src = st.columns(3)
         blood_group = col_group.selectbox("Blood Group", sorted(all_groups) if all_groups else ['A+', 'O-', 'AB+'])
-        component = col_comp.selectbox("Component", sorted(all_components) if all_components else ['Whole Blood', 'PRBC', 'FFP', 'Platelets'])
-        source = col_src.text_input("Source (e.g., Main Hospital, Donor Bus)") # FIX: Changed to text_input
+        
+        # FIX: Component selection needs to update the calculated expiry date
+        selected_component_for_calc = col_comp.selectbox(
+            "Component", 
+            sorted(all_components) if all_components else ['Whole Blood', 'PRBC', 'FFP', 'Platelets'],
+            key='add_unit_component_select'
+        )
+        source = col_src.text_input("Source (e.g., Main Hospital, Donor Bus)")
         
         col_coll, col_exp = st.columns(2)
         
         default_collected = datetime.today().date()
-        default_expiry = (datetime.today() + timedelta(days=42)).date()
         
-        collected_date = col_coll.date_input("Collection Date", value=default_collected)
-        expiry_date = col_exp.date_input("Expiry Date", value=default_expiry)
+        # Calculate default expiry based on selected component
+        default_expiry_calc = calculate_expiry_date(default_collected, selected_component_for_calc)
+        
+        collected_date = col_coll.date_input("Collection Date", value=default_collected, key='collected_date_input')
+        
+        # FIX: The expiry date is automatically calculated but REMAINS EDITABLE
+        expiry_date = col_exp.date_input(
+            "Expiry Date (Auto-calculated, Edit if necessary)", 
+            value=calculate_expiry_date(collected_date, selected_component_for_calc), # Recalculate based on input
+            key='expiry_date_input'
+        )
         
         st.write("---")
-        st.subheader("Optional: Allocation Details (Unit Status will default to 'Available')")
+        st.subheader("Optional: Allocation Details")
         
         col_pat, col_xm = st.columns(2)
         patient_id = col_pat.text_input("Allocate to Patient ID (Optional)")
@@ -218,22 +257,25 @@ with tab2:
             elif unit_id in st.session_state['inventory_df']['unit_id'].values:
                 st.error(f"Unit ID {unit_id} already exists in the inventory.")
             else:
+                # Prepare data for new unit
                 new_data_dict = {
                     'unit_id': unit_id,
                     'segment_number': segment_number if segment_number else 'N/A',
                     'blood_group': blood_group,
-                    'component': component,
+                    'component': selected_component_for_calc, # Use the selected component
                     'collected': collected_date, 
-                    'expiry': expiry_date,
+                    'expiry': expiry_date, # Use the date from the editable input
                     'volume': volume, 
-                    'source': source if source else 'Manual Entry', # Use free text input
+                    'source': source if source else 'Manual Entry',
                     'status': initial_status,
                     'patient_id': patient_id if patient_id else 'None',
                     'crossmatched_date': crossmatch_date if crossmatch_date else np.datetime64('NaT')
                 }
 
+                # Create DataFrame with explicit column order
                 new_unit_df = pd.DataFrame([new_data_dict], columns=MASTER_COLUMNS)
                 
+                # CRITICAL FIX 3: Robustly concatenate and update state
                 st.session_state['inventory_df'] = pd.concat([st.session_state['inventory_df'], new_unit_df], ignore_index=True)
 
                 save_data(st.session_state['inventory_df'])
@@ -275,9 +317,9 @@ with tab4:
         
         
 # --- Final Clock Loop ---
-# This loop runs forever and updates the clock_placeholder every second.
 while True:
     with clock_placeholder:
+        # FIX: Ensure clock is also in MM/DD/YYYY format for consistency
         current_time = datetime.now().strftime("%A, %B %d, %Y | %I:%M:%S %p")
-        st.markdown(f"#### ⏱️ Current Time: **{current_time}**")
+        st.markdown(f"#### ⏱️ Current Time: **{datetime.now().strftime(f'{DATE_FORMAT_STRING} | %I:%M:%S %p')}**")
     time.sleep(1)
