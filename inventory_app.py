@@ -75,14 +75,13 @@ def update_inventory_status(df):
 def save_data(df):
     """Saves the current DataFrame back to the CSV file using the specified format."""
     
-    # CRITICAL FIX 1: Explicitly handle NaT values to 'None' string before saving
     def date_to_string(d):
         if pd.isna(d):
             return 'None'
         try:
             return d.strftime(DATE_FORMAT_STRING)
         except:
-            return 'None' # Fallback for non-datetime objects that are also not NaT
+            return 'None'
     
     df['collected'] = df['collected'].apply(date_to_string)
     df['expiry'] = df['expiry'].apply(date_to_string)
@@ -187,7 +186,7 @@ with tab1:
             save_data(st.session_state['inventory_df'])
             
             st.success("Inventory changes saved successfully!")
-            st.experimental_rerun()
+            st.rerun() # FIX: Replaced st.experimental_rerun()
             
         except Exception as e:
             st.error(f"An error occurred during save in Active Inventory. Error: {e}")
@@ -250,11 +249,9 @@ with tab2:
                 elif unit_id in st.session_state['inventory_df']['unit_id'].values:
                     st.error(f"Unit ID {unit_id} already exists in the inventory.")
                 else:
-                    # CRITICAL FIX 2: Define a robust string conversion for the form data
                     def date_input_to_string(d):
                         if d is None:
                             return 'None'
-                        # Handle both date and datetime objects
                         if isinstance(d, datetime) or isinstance(d, date):
                              return d.strftime(DATE_FORMAT_STRING)
                         return 'None'
@@ -275,7 +272,6 @@ with tab2:
 
                     new_unit_df = pd.DataFrame([new_data_dict], columns=MASTER_COLUMNS)
                     
-                    # Temporarily load the current state, ensuring all existing data is string formatted for clean concatenation
                     temp_current_df = st.session_state['inventory_df'].copy()
                     temp_current_df['collected'] = temp_current_df['collected'].apply(lambda x: x.strftime(DATE_FORMAT_STRING) if pd.notna(x) else 'None')
                     temp_current_df['expiry'] = temp_current_df['expiry'].apply(lambda x: x.strftime(DATE_FORMAT_STRING) if pd.notna(x) else 'None')
@@ -283,14 +279,13 @@ with tab2:
                     
                     final_concatenated_df = pd.concat([temp_current_df, new_unit_df], ignore_index=True)
                     
-                    # Save the new, string-formatted DataFrame
                     save_data(final_concatenated_df) 
                     
                     st.success(f"Unit {unit_id} successfully added and saved! Status: {initial_status}")
-                    st.experimental_rerun()
+                    st.rerun() # FIX: Replaced st.experimental_rerun()
             except Exception as e:
                 st.error(f"An error occurred while adding the unit. **Please check the full traceback below and send me the error message!**")
-                st.exception(e) # Display full traceback
+                st.exception(e)
                 
 # ... (Tab 3 and Tab 4 remain unchanged)
 
