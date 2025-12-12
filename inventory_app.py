@@ -10,29 +10,37 @@ from io import BytesIO
 
 # --- Configuration & Data Store ---
 INVENTORY_FILE = 'df.csv'
-DATE_FORMAT_STRING = '%Y-%m-%d' # ISO standard for internal/form use
+DATE_FORMAT_STRING = '%Y-%m-%d' 
 DATE_DISPLAY_FORMAT = 'MM/DD/YYYY' 
 EXPIRY_WARNING_DAYS = 7 
 EXPIRY_CRITICAL_DAYS = 3 
 
-MASTER_COLUMNS = [
-    'serial', 'segment', 'source', 'blood_type', 'component', 'volume', 
-    'collected', 'expiry', 'age', 'status', 'patient'
-]
+# Define MASTER_COLUMNS with correct expected dtypes
+MASTER_COLUMNS = {
+    'serial': str, 
+    'segment': str, 
+    'source': str, 
+    'blood_type': str, 
+    'component': str, 
+    'volume': float, 
+    'collected': 'datetime64[ns]', 
+    'expiry': 'datetime64[ns]', 
+    'age': str, 
+    'status': str, 
+    'patient': str
+}
+COLUMN_NAMES = list(MASTER_COLUMNS.keys())
 
-# Standard Blood Types and Components for Select boxes
 BLOOD_TYPES = ['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-']
 COMPONENTS = ['Whole Blood', 'PRBC', 'Platelets', 'FFP']
 STATUS_OPTIONS = ['Available', 'Crossmatched', 'Expired', 'Transfused']
 
-# --- Utility Functions (Python Reimplementation) ---
+# --- Utility Functions ---
 
 def calculate_expiry(collected_date, component):
-    """Calculates the expiry date based on the component and collected date."""
     if collected_date is None or pd.isna(collected_date):
         return None
     
-    # Ensure collected_date is a date object for timedelta arithmetic
     if isinstance(collected_date, datetime):
         collected_date = collected_date.date()
     
@@ -46,16 +54,13 @@ def calculate_expiry(collected_date, component):
         return collected_date + timedelta(days=42)
 
 def compute_age_text(collected_date, component):
-    """Computes the age of the unit, formatted as 'Nd' or 'Ny Md' for FFP."""
-    # CRITICAL FIX: Check for NaT or None aggressively before proceeding
+    """Computes the age of the unit, now with simplified time delta logic."""
     if collected_date is None or pd.isna(collected_date) or not component:
-        return 'N/A' # Return a single, simple string for alignment
+        return 'N/A'
     
-    # Ensure collected_date is a date object for comparison
-    if isinstance(collected_date, datetime):
-        collected_date = collected_date.date()
-        
-    today = datetime.today().date()
+    today = datetime.now().date()
+    # Safely convert to date object if it's a Pandas timestamp
+    collected_date = collected_date.date() if isinstance(collected_date, (datetime, pd.Timestamp)) else collected_date
     
     if collected_date > today:
         return 'Future'
@@ -63,6 +68,7 @@ def compute_age_text(collected_date, component):
     diff_days = (today - collected_date).days
     
     if component == "FFP":
+        # Simplified: just show years/days for FFP
         y = diff_days // 365
         d = diff_days % 365
         return f"{y}y {d}d"
@@ -70,50 +76,58 @@ def compute_age_text(collected_date, component):
     return f"{diff_days}d"
 
 def load_data():
-    """Loads or initializes the inventory DataFrame."""
-    if os.path.exists(INVENTORY_FILE):
-        df = pd.read_csv(INVENTORY_FILE)
-    else:
-        df = pd.DataFrame(columns=MASTER_COLUMNS)
+    """Loads, cleans, and validates the inventory DataFrame."""
+    try:
+        if os.path.exists(INVENTORY_FILE):
+            df = pd.read_csv(INVENTORY_FILE)
+            st.warning(f"Loaded {len(df)} rows from {INVENTORY_FILE}. Performing validation...")
+        else:
+            df = pd.DataFrame(columns=COLUMN_NAMES)
+            st.info("Creating new inventory file.")
+    except Exception as e:
+        st.error(f"Error reading {INVENTORY_FILE}. Creating empty DataFrame. Error: {e}")
+        df = pd.DataFrame(columns=COLUMN_NAMES)
+        
+    # 1. ENFORCE COLUMN STRUCTURE
+    # Add missing columns with default values and remove unknown columns
+    df = df.reindex(columns=COLUMN_NAMES)
     
-    # 1. CLEANUP: Replace any bad strings with NaN
+    # 2. DATA CLEANUP & TYPE COERCION
+    
+    # Text Columns Cleanup (Fill NaNs with 'None', convert to string)
+    for col in ['serial', 'segment', 'source', 'blood_type', 'component', 'status', 'patient', 'age']:
+        if col in df.columns:
+            # Replace common bad values with NaN, then fill NaN with 'None'
+            df[col] = df[col].replace(['', 'None', 'nan'], np.nan).fillna('None').astype(str)
+        
+    # Numeric Columns Cleanup
+    if 'volume' in df.columns:
+        df['volume'] = pd.to_numeric(df['volume'], errors='coerce').fillna(0).astype(float)
+        
+    # Date Columns Cleanup (CRITICAL STEP)
     for col in ['collected', 'expiry']:
         if col in df.columns:
+            # Replace 'None' string with NaN, then coerce to datetime.
             df[col] = df[col].replace('None', np.nan) 
-
-    # 2. TYPE COERCION: Ensure date columns are proper datetime objects
-    for col in ['collected', 'expiry']:
-        if col in df.columns:
             df[col] = pd.to_datetime(df[col], format=DATE_FORMAT_STRING, errors='coerce')
         else:
-            df[col] = pd.NaT # Add column if missing
-
-    # 3. FILL TEXT NaNs
-    for col in ['segment', 'source', 'patient', 'component', 'blood_type']:
-        if col in df.columns:
-            df[col] = df[col].fillna('None').astype(str)
-        
-    # 4. RECALCULATE AGE and STATUS
-    # This line now uses a robust compute_age_text function that returns a simple string 
-    # ('N/A') even if inputs are missing/NaT, preventing the ValueError.
+            df[col] = pd.NaT # Ensure column exists if it didn't
+    
+    # 3. RE-CALCULATE AGE and STATUS (This step is now safer)
     df['age'] = df.apply(lambda row: compute_age_text(row['collected'], row['component']), axis=1)
     df = update_inventory_status(df)
         
-    df = df.reindex(columns=MASTER_COLUMNS, fill_value=None)
     return df
-
-# The rest of the functions (update_inventory_status, save_data, color_rows_by_expiry, 
-# generate_docx_report) remain the same as the last working version.
-# I will omit them here for brevity but ensure you use the complete version
-# including the rest of the app code below this line.
 
 def update_inventory_status(df):
     """Checks expiry dates and updates unit status."""
     today_date_only = datetime.today().date()
     expirable_statuses = ['Available', 'Crossmatched']
     
-    if 'expiry' in df.columns:
+    # Check for expired units
+    if 'expiry' in df.columns and not df['expiry'].isnull().all():
         # Check if the date is less than or equal to today, and if it's one of the expirable statuses
+        # The .dt.date access is now safe because load_data enforces datetime type.
         df.loc[(df['status'].isin(expirable_statuses)) & (df['expiry'].dt.date <= today_date_only), 'status'] = 'Expired'
     
     return df
@@ -133,6 +147,8 @@ def save_data(df):
     df_save['collected'] = df_save['collected'].apply(date_to_string)
     df_save['expiry'] = df_save['expiry'].apply(date_to_string)
     
+    # Save only the MASTER_COLUMNS to prevent proliferation of unwanted columns
+    df_save = df_save.reindex(columns=COLUMN_NAMES)
     df_save.to_csv(INVENTORY_FILE, index=False)
 
 def color_rows_by_expiry(row):
@@ -219,7 +235,7 @@ if 'inventory_df' not in st.session_state:
 
 st.session_state['inventory_df'] = update_inventory_status(st.session_state['inventory_df'].copy())
 
-# --- Streamlit UI (The rest of the code remains the same) ---
+# --- Streamlit UI (The remaining Streamlit code remains the same) ---
 
 st.set_page_config(layout="wide", page_title="Blood Bag Inventory")
 
@@ -335,7 +351,7 @@ with tab_add:
                     'patient': patient if patient else 'None'
                 }
 
-                new_unit_df = pd.DataFrame([new_unit_data], columns=MASTER_COLUMNS)
+                new_unit_df = pd.DataFrame([new_unit_data], columns=COLUMN_NAMES)
                 
                 final_concatenated_df = pd.concat([st.session_state['inventory_df'], new_unit_df], ignore_index=True)
                 
@@ -343,4 +359,52 @@ with tab_add:
                 
                 st.session_state['inventory_df'] = load_data() 
                 st.success(f"Unit {serial} successfully added! Status: {initial_status}")
-                st
+                st.rerun() 
+            
+# ==================================
+# TAB 2: ACTIVE INVENTORY
+# ==================================
+with tab_inv:
+    st.header("Active Inventory")
+    
+    inventory_df_filtered = filtered_df[filtered_df['status'].isin(['Available', 'Crossmatched'])].copy()
+    
+    if f_status != 'All':
+        inventory_df_filtered = inventory_df_filtered[inventory_df_filtered['status'] == f_status]
+        
+    inventory_df_filtered = inventory_df_filtered.sort_values(
+        by=['status', 'expiry'], 
+        ascending=[True, True]
+    )
+
+    if inventory_df_filtered.empty:
+        st.info("No active units found matching the current filters.")
+    else:
+        display_df = inventory_df_filtered.rename(columns={
+            'serial': 'Serial', 'segment': 'Segment', 'source': 'Source', 
+            'blood_type': 'Blood Type', 'component': 'Component', 
+            'volume': 'Volume', 'collected': 'Collection', 'expiry': 'Expiry', 
+            'age': 'Days Old', 'status': 'Status', 'patient': 'Patient'
+        })[['Serial', 'Segment', 'Source', 'Blood Type', 'Component', 'Volume', 'Collection', 'Expiry', 'Days Old', 'Status', 'Patient']]
+        
+        st.caption("Editing the table below automatically updates the inventory data.")
+
+        edited_df = st.data_editor(
+            display_df.style.apply(color_rows_by_expiry, axis=1),
+            key="active_inventory_editor",
+            use_container_width=True,
+            column_config={
+                "Collection": st.column_config.DateColumn("Collection", format=DATE_DISPLAY_FORMAT, disabled=True),
+                "Expiry": st.column_config.DateColumn("Expiry", format=DATE_DISPLAY_FORMAT),
+                "Status": st.column_config.SelectboxColumn("Status", options=STATUS_OPTIONS),
+            },
+            num_rows="fixed" 
+        )
+        
+        if st.button("💾 Save Changes", type="primary"):
+            for col in ['Collection', 'Expiry']:
+                edited_df[col] = pd.to_datetime(edited_df[col], errors='coerce')
+                
+            edited_df.columns = [c.lower().replace(' ', '_') for c in edited_df.columns]
+            
+            st.session_state['inventory_df'].loc[edited_df.index] = edited_df
